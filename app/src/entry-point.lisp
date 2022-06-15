@@ -18,8 +18,12 @@
   (locally
       (declare #+sbcl (sb-ext:muffle-conditions style-warning))
     (handler-bind (#+sbcl (style-warning #'muffle-warning))
-      (cffi:load-foreign-library 'magicl.foreign-libraries::libblas)
-      (cffi:load-foreign-library 'magicl.foreign-libraries::liblapack))))
+      ;; We used to reload
+      ;;
+      ;;    magicl.foreign-libraries::{libblas, liblapack}
+      ;;
+      ;; here.
+      nil)))
 
 (defun print-matrix-with-comment-hashes (matrix &optional (stream *standard-output*))
   (format stream "~D"
@@ -95,12 +99,6 @@
   #+sbcl
   (format t "Loaded libraries:~%~{  ~A~%~}~%"
           (mapcar 'sb-alien::shared-object-pathname sb-sys:*shared-objects*))
-  (unless (magicl.foreign-libraries:foreign-symbol-available-p "zuncsd_"
-                                                               'magicl.foreign-libraries:liblapack)
-    (format t "The loaded version of LAPACK is missing ~
-    functionality. The compiler will still work with your current ~
-    LAPACK but it is advisable to install a more complete version.~%")
-    (uiop:quit 1))
   (format t "Library check passed.~%")
   (uiop:quit 0))
 
@@ -327,124 +325,120 @@
 
     (when check-sdk-version
       (asynchronously-indicate-update-availability +QUILC-VERSION+ :proxy proxy))
-    ;;
-    ;; At this point we know we're doing something. Strap in LAPACK.
-    ;;
 
-    (magicl:with-blapack
-      (reload-foreign-libraries)
+    (reload-foreign-libraries)
 
-      (cond
-        ;;
-        ;; RPCQ server mode requested
-        ;;
-        (server-mode-rpc
-         (unless quiet
-           (show-banner))
+    (cond
+      ;;
+      ;; RPCQ server mode requested
+      ;;
+      (server-mode-rpc
+       (unless quiet
+         (show-banner))
 
-         (cl-syslog:rfc-log (*logger* :info "Launching quilc.")
-           (:msgid "LOG0001"))
+       (cl-syslog:rfc-log (*logger* :info "Launching quilc.")
+         (:msgid "LOG0001"))
 
-         (when (or compile backend output)
-           (cl-syslog:rfc-log (*logger* :warning "--backend and --output-file/-o options ~
+       (when (or compile backend output)
+         (cl-syslog:rfc-log (*logger* :warning "--backend and --output-file/-o options ~
                                                   don't make sense when using server mode. ~
                                                   Ignoring them.")))
-         (when verbose
-           (setf quil::*compiler-noise* *error-output*)
-           (warn "--verbose output is not appropriate for production multithreaded environments, and should b used when debugging and with care"))
-         ;; launch the polling loop
-         (start-rpc-server :host host
-                           :port port
-                           :logger *logger*
-                           :time-limit time-limit))
+       (when verbose
+         (setf quil::*compiler-noise* *error-output*)
+         (warn "--verbose output is not appropriate for production multithreaded environments, and should b used when debugging and with care"))
+       ;; launch the polling loop
+       (start-rpc-server :host host
+                         :port port
+                         :logger *logger*
+                         :time-limit time-limit))
 
-        ;;
-        ;; server modes not requested, so continue parsing arguments
-        ;;
-        (t
-         (setf *human-readable-stream* *error-output*)
-         (setf *quil-stream* *standard-output*)
+      ;;
+      ;; server modes not requested, so continue parsing arguments
+      ;;
+      (t
+       (setf *human-readable-stream* *error-output*)
+       (setf *quil-stream* *standard-output*)
 
-         (let* ((program-text (slurp-lines))
-                (program (safely-parse-quil program-text))
-                (original-matrix (when (and protoquil compute-matrix-reps)
-                                   (parsed-program-to-logical-matrix program)))
-                (chip-spec (lookup-isa-descriptor-for-name isa)))
-           (multiple-value-bind (processed-program statistics)
-               (process-program program chip-spec
-                                :protoquil protoquil
-                                :verbose (if verbose *human-readable-stream* (make-broadcast-stream))
-                                :gate-whitelist (and gate-whitelist
-                                                     (split-sequence:split-sequence
-                                                      #\,
-                                                      (remove #\Space gate-whitelist)
-                                                      :remove-empty-subseqs t))
-                                :gate-blacklist (and gate-blacklist
-                                                     (split-sequence:split-sequence
-                                                      #\,
-                                                      (remove #\Space gate-blacklist)
-                                                      :remove-empty-subseqs t)))
+       (let* ((program-text (slurp-lines))
+              (program (safely-parse-quil program-text))
+              (original-matrix (when (and protoquil compute-matrix-reps)
+                                 (parsed-program-to-logical-matrix program)))
+              (chip-spec (lookup-isa-descriptor-for-name isa)))
+         (multiple-value-bind (processed-program statistics)
+             (process-program program chip-spec
+                              :protoquil protoquil
+                              :verbose (if verbose *human-readable-stream* (make-broadcast-stream))
+                              :gate-whitelist (and gate-whitelist
+                                                   (split-sequence:split-sequence
+                                                    #\,
+                                                    (remove #\Space gate-whitelist)
+                                                    :remove-empty-subseqs t))
+                              :gate-blacklist (and gate-blacklist
+                                                   (split-sequence:split-sequence
+                                                    #\,
+                                                    (remove #\Space gate-blacklist)
+                                                    :remove-empty-subseqs t)))
 
 
-             ;; NOTE: This flow is deprecated and will be merged with
-             ;; quil-backend in the future.
-             (unless compile
-               ;; If we want circuit definitons, keep them. Otherwise
-               ;; delete so they don't get printed.
-               (unless print-circuit-definitions
-                 (setf (parsed-program-circuit-definitions processed-program) nil))
+           ;; NOTE: This flow is deprecated and will be merged with
+           ;; quil-backend in the future.
+           (unless compile
+             ;; If we want circuit definitons, keep them. Otherwise
+             ;; delete so they don't get printed.
+             (unless print-circuit-definitions
+               (setf (parsed-program-circuit-definitions processed-program) nil))
 
-               ;; Print the program to stdout
-               (print-program processed-program *quil-stream*)
+             ;; Print the program to stdout
+             (print-program processed-program *quil-stream*)
 
-               ;; If we are using protoquil (no control flow), then we
-               ;; can print statistics about the program as comments at
-               ;; the end of the output.
-               (when (and protoquil print-statistics)
-                 (print-statistics statistics *quil-stream*))
+             ;; If we are using protoquil (no control flow), then we
+             ;; can print statistics about the program as comments at
+             ;; the end of the output.
+             (when (and protoquil print-statistics)
+               (print-statistics statistics *quil-stream*))
 
-               ;; If we are using protoquil (no control flow), then we
-               ;; can print the input and output unitary matrix as
-               ;; comments at the end of the output.
-               (when (and protoquil compute-matrix-reps)
-                 (let* ((processed-program-matrix (parsed-program-to-logical-matrix processed-program :compress-qubits t))
-                        ;; If a TOLERANCE pragma is found, allow non-zero phase invariant distance
-                        (tolerance (cl-quil::prog-find-top-pragma program "TOLERANCE")))
-                   (if tolerance
-                       (print-matrix-comparision
-                        original-matrix processed-program-matrix
-                        :tolerance t)
-                       (print-matrix-comparision
-                        original-matrix
-                        (quil::scale-out-matrix-phases processed-program-matrix original-matrix))))))
+             ;; If we are using protoquil (no control flow), then we
+             ;; can print the input and output unitary matrix as
+             ;; comments at the end of the output.
+             (when (and protoquil compute-matrix-reps)
+               (let* ((processed-program-matrix (parsed-program-to-logical-matrix processed-program :compress-qubits t))
+                      ;; If a TOLERANCE pragma is found, allow non-zero phase invariant distance
+                      (tolerance (cl-quil::prog-find-top-pragma program "TOLERANCE")))
+                 (if tolerance
+                     (print-matrix-comparision
+                      original-matrix processed-program-matrix
+                      :tolerance t)
+                     (print-matrix-comparision
+                      original-matrix
+                      (quil::scale-out-matrix-phases processed-program-matrix original-matrix))))))
 
-             ;; New and improved flow
-             (when compile
-               (unless backend
-                 (error "Backend must be provided when compilation is ~
+           ;; New and improved flow
+           (when compile
+             (unless backend
+               (error "Backend must be provided when compilation is ~
                  enabled. For a list of available backends, run 'quilc ~
                  --list-backends'."))
 
-               (unless output
-                 (error "Output must be provided when compilation is ~
+             (unless output
+               (error "Output must be provided when compilation is ~
                  enabled. Specify an output file with -o or ~
                  --output."))
 
-               (let ((backend-class (quil:find-backend backend)))
-                 (unless backend-class
-                   (error "The backend value '~a' does not name an ~
+             (let ((backend-class (quil:find-backend backend)))
+               (unless backend-class
+                 (error "The backend value '~a' does not name an ~
                    available backend. For a list of available ~
                    backends, run 'quilc --list-backends'." backend))
 
-                 ;; TODO: Compute and pass statistics to backend when
-                 ;; using protoquil
-                 (let ((backend
-                         (apply #'make-instance backend-class
-                                (parse-backend-options backend-option))))
-                   (unless (quil:backend-supports-chip-p backend chip-spec)
-                     (error "The backend provided does not support this ISA."))
+               ;; TODO: Compute and pass statistics to backend when
+               ;; using protoquil
+               (let ((backend
+                       (apply #'make-instance backend-class
+                              (parse-backend-options backend-option))))
+                 (unless (quil:backend-supports-chip-p backend chip-spec)
+                   (error "The backend provided does not support this ISA."))
 
-                   (backend-compile-program processed-program chip-spec backend output)))))))))))
+                 (backend-compile-program processed-program chip-spec backend output))))))))))
 
 (defun parse-backend-options (options)
   "Parse backend options to keyword init-args for making backend."

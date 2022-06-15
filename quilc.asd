@@ -13,7 +13,6 @@
                #:command-line-arguments
                #:yason
                (:version #:magicl/core "0.9.0")
-               #:magicl/ext-lapack
                #:cl-quil
                #:cl-quil/chip-library
                #:cl-quil-benchmarking

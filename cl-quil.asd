@@ -109,7 +109,6 @@
                #:cl-permutation
                #:trivial-garbage
                #:magicl/core
-               #:magicl/ext-lapack      ; for gate fusion
                #:global-vars            ; Static globals
                #:salza2                 ; God table compression
                #:optima

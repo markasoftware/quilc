@@ -50,12 +50,8 @@ Prerequisites to building `quilc` are:
 Follow [these instructions](https://github.com/quil-lang/qvm/blob/master/doc/lisp-setup.md)
 to get started from scratch.
 
-One notorious dependency is [MAGICL](https://github.com/quil-lang/magicl). It is available on Quicklisp,
-but requires you to install some system libraries such as BLAS, LAPACK, and libffi. Follow MAGICL's
-instructions carefully before proceeding with loading CL-QUIL or `make`ing quilc.
-
-Once these dependencies are installed, building should be easy. Building the `quilc`
-binary is automated using the `Makefile`:
+Building should be easy. Building the `quilc` binary is automated
+using the `Makefile`:
 
 ``` shell
 $ make quilc
