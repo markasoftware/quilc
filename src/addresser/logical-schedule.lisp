@@ -218,12 +218,12 @@ as the size keyword arg to make-hash-table."
 ;;; routines for incrementally forming a logical-scheduler object
 ;;;
 
-(defun lscheduler-clean-up-last-instrs (lschedule)
-  "Removes instructions from (lscheduler-later-instructions LSCHEDULE) whose resources are fully covered by preceding instructions in the list."
+(defun clean-up-last-instrs-by-resources (instrs)
+  "Returns a copy of INSTRS, removing instructions whose resources are fully covered by preceding instructions in the list."
   (let ((new-bottommost nil)
         (traversed-instructions nil)
         (traversed-resources (make-null-resource)))
-    (dolist (instr (lscheduler-last-instrs lschedule))
+    (dolist (instr instrs)
       (let ((resources (instruction-resources instr)))
         (cond
           ;; in the global case, we're definitely done
@@ -259,23 +259,40 @@ as the size keyword arg to make-hash-table."
            (setf traversed-resources (resource-union traversed-resources resources))
            (push instr new-bottommost)))
         (push instr traversed-instructions)))
-    (setf (lscheduler-last-instrs lschedule) (nreverse new-bottommost))))
+    (nreverse new-bottommost)))
+
+(defun lscheduler-clean-up-last-instrs (lschedule)
+  "Removes instructions from (lscheduler-later-instructions LSCHEDULE) whose resources are fully covered by preceding instructions in the list."
+  (setf (lscheduler-last-instrs lschedule)
+        (clean-up-last-instrs-by-resources (lscheduler-last-instrs lschedule))))
+
+(defun lscheduler-add-edge (lschedule instr-from instr-to)
+  (push (gethash instr-from (lscheduler-later-instrs lschedule)) instr-to)
+  (push (gethash instr-to (lscheduler-earlier-instrs lschedule)) instr-from))
 
 (defun append-instructions-to-lschedule-parallel (lschedule instrs)
   "Simultaneously add multiple instructions to the lschedule, in the sense that dependency relationships between INSTRS will not be considered, only their dependency relationships to the instructions already in the lschedule."
   (let (new-top-instrs)
 
     (dolist (instr instrs)
-      (let ((resources (instruction-resources instr)))
-        ;; Hook up "earlier" and "later" links to each bottom instruction:
-        (dolist (bottom-instr (lscheduler-last-instrs lschedule))
-          (when (or (resource-all-p resources)
-                    (resources-intersect-p resources (instruction-resources bottom-instr)))
-            (push bottom-instr (gethash instr (lscheduler-earlier-instrs lschedule)))
-            (push instr (gethash bottom-instr (lscheduler-later-instrs lschedule)))))
-        ;; Add to "top" if no prerequisites
-        (unless (gethash instr (lscheduler-earlier-instrs lschedule))
-          (push instr new-top-instrs))))
+      ;; Hook up "earlier" and "later" links to each bottom instruction:
+      (loop :with our-resources := (instruction-resources instr)
+            :for bottom-instr :in (lscheduler-last-instrs lschedule)
+            ;; subset of our-resources which we have already found in last-instrs:
+            :with linked-resources := (make-null-resource)
+            :for cur-resources := (instruction-resources bottom-instr)
+            :for intersection := (resource-intersection our-resources cur-resources)
+            ;; make the link if BOTTOM-INSTR adds something new to LINKED-RESOURCES
+            :do (when (or (and (not (resource-null-p intersection))
+                               (not (resource-subsetp intersection linked-resources)))
+                          (resource-all-p our-resources))
+                  (push bottom-instr (gethash instr (lscheduler-earlier-instrs lschedule)))
+                  (push instr (gethash bottom-instr (lscheduler-later-instrs lschedule)))
+                  (setf linked-resources (resource-union intersection linked-resources))))
+        
+      ;; Add to "top" if no prerequisites
+      (unless (gethash instr (lscheduler-earlier-instrs lschedule))
+        (push instr new-top-instrs)))
 
     (a:appendf (lscheduler-first-instrs lschedule) new-top-instrs)
     (setf (lscheduler-last-instrs lschedule)
@@ -340,6 +357,11 @@ as the size keyword arg to make-hash-table."
     (t
      (append-instruction-to-lschedule lschedule (first instrs))
      (append-instructions-to-lschedule lschedule (rest instrs)))))
+
+(defun instructions-to-lschedule (instrs)
+  (let ((lschedule (make-instance 'logical-scheduler)))
+    (dolist (instr instrs)
+      (append-instruction-to-lschedule lschedule instr))))
 
 (defun lscheduler-dequeue-instruction (lschedule instr)
   "Removes INSTR from the top of LSCHEDULE."
@@ -455,15 +477,13 @@ use RESOURCE."
        (push lo-inst (gethash new-inst earlier-instrs)))
       (lo-inst
        ;; connect before
-       (push new-inst (gethash lo-inst later-instrs))
-       (push lo-inst (gethash new-inst earlier-instrs))
+       (lscheduler-add-edge lschedule lo-inst new-inst)
        ;; connect after
        (push new-inst last-instrs)
        (lscheduler-clean-up-last-instrs lschedule))
       (hi-inst
        ;; connect after
-       (push new-inst (gethash hi-inst earlier-instrs))
-       (push hi-inst (gethash new-inst later-instrs))
+       (lscheduler-add-edge lschedule new-inst hi-inst)
        ;; connect before
        (a:removef first-instrs hi-inst)
        (push new-inst first-instrs))
@@ -473,6 +493,53 @@ use RESOURCE."
        ;; connect after
        (push new-inst last-instrs)
        (lscheduler-clean-up-last-instrs lschedule)))))
+
+;; (defun lschedule-splice-instruction-sequence (lschedule old-instrs new-instrs)
+;;   "Mutate the lschedule to replace OLD-INSTRS with NEW-INSTRS. The following preconditions must be obeyed but are not checked:
+;; + NEW-INSTRS must consume a subset of the resources consumed by OLD-INSTRS
+;; + It must be possible to commute the OLD-INSTRS contiguously in the LSCHEDULE"
+;;   ;; A lame way is to figure out how the instructions would commute so that old-instrs are together, then serialize and re-deserialize it.
+;;   ;; A somewhat smarter way, done here, is to simply recalculate the links that enter and exit the old-instrs region. This only works on resource-based logical schedules, and not on fully general Hasse diagrams that encode other sorts of commutativity; in those cases we may also need to consider the replacement's new relationship with instructions other than just those pointing into or out of the old region.
+;;   (with-slots (earlier-instrs later-instrs first-instrs last-instrs) lschedule
+
+;;     (flet ((side-instrs (ht1 ht2)
+;;              "Return the set instrs that can be reached from OLD-INSTRS using HT1. Also removes all outbound edges from OLD-INSTRS according to HT1 and all edges from the returned set into OLD-INSTRS from HT2."
+;;              (remove-duplicates
+;;               (loop :for instr :in old-instrs
+;;                     :append (loop :for side-instr :in (gethash instr ht1)
+;;                                   :do (a:removef (gethash side-instr ht2) instr)
+;;                                   :collect side-instr)
+;;                     :do (remhash instr ht1)))))
+
+;;       (let* ((early-side-instrs (side-instrs earlier-instrs later-instrs))
+;;              (late-side-instrs (side-instrs earlier-instrs later-instrs))
+;;              (temp-bottom early-side-instrs))
+
+;;         ;; Remove old instructions from top and bottom
+;;         (dolist (ht (list earlier-instrs later-instrs))
+;;           (dolist (instr old-instrs)
+;;             (remhash instr ht)))
+;;         ;; Add new instructions
+;;         (mapc (lambda (instr)
+;;                 (dolist (bottom-instr temp-bottom)
+;;                   (when (or (resource-all-p instr)
+;;                             (resources-intersect-p (instruction-resources instr)
+;;                                                    (instruction-resources bottom-instr)))
+;;                     (lscheduler-add-edge lschedule bottom-instr instr)))
+;;                 (push instr temp-bottom)
+;;                 (setf temp-bottom (clean-up-last-instrs-by-resources temp-bottom))
+;;                 ;; Add to first-instrs if appropriate
+;;                 (when (not (gethash instr earlier-instrs))
+;;                   (push instr first-instrs)))
+;;               new-instrs late-side-instrs)
+;;         ;; Add appropriate new instrs to bottom
+;;         (a:appendf last-instrs (reverse new-instrs))
+;;         (lscheduler-clean-up-last-instrs lschedule)))))
+
+;; TODO: possible improvements to splice: If we have easier removal/insertion functions for single
+;; operations that maintain invariants, the whole thing would be slower but easier to read. Oh well,
+;; as long as this is the only thing that mutates the lschedule for the new matcher, it's not so
+;; bad.
 
 ;;;
 ;;; read-only statistical routines for logical-scheduler objects
