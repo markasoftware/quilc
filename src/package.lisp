@@ -833,6 +833,7 @@
    #:include-pathname                   ; READER
 
    #:instruction                        ; ABSTRACT CLASS
+   #:print-instruction-generic          ; GENERIC
 
    #:no-operation                       ; CLASS
 
